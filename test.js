@@ -361,8 +361,10 @@ function init() {
 		console.log('('+x+','+y+') piece');
 		const piece = gameBoard.get(x, y).value;
 		console.log(piece);
-		console.log('piace plans');
-		console.log(piece.getActionPlans(gameBoard, piece.player.next.planBoard));
+		if(piece) {
+			console.log('piace plans');
+			console.log(piece.getActionPlans(gameBoard, piece.player.next.planBoard));
+		}
 		console.log('('+x+','+y+') wplayer plans');
 		console.log(wplayer.planBoard.get(x, y).value);
 		console.log('('+x+','+y+') bplayer plans');
