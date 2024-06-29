@@ -106,18 +106,28 @@ class GameBoard extends Board {
 	}
 }
 
+//piece 毎の次行動プラン
 class ActionPlan {
-	constructor(x, y, piece, target, route=[]) {
+	constructor(x, y, piece, target, route) {
 		this.x = x; //対象位置
 		this.y = y;
 		this.piece = piece; //アクションするピース
 		this.target = target; //対象ピース(自分の駒だったらガード対象, 相手の駒だったら取られる駒)
-		this.route = structuredClone(route); //ここに来るまでに piece が通る位置{x,y}
-		this.getOnly = false; //true だったら target が空でも(単なる)移動先には出来ない (Pawn の斜め前用)
+		this.route = route && route.lenth > 0 ? structuredClone(route) : undefined; //ここに来るまでに piece が通る位置{x,y}
+		this.captureOnly = false; //true だったら target が空でも(単なる)移動先には出来ない (Pawn の斜め前用)
 	}
-	setGetOnly(getOnly) {
-		this.getOnly = getOnly;
+	setCaptureOnly(captureOnly) {
+		this.captureOnly = !!captureOnly;
 		return this;
+	}
+	isCapture() {
+		return this.target && this.target.player !== this.piece.player;
+	}
+	isGuard() {
+		return this.target && this.target.player === this.piece.player;
+	}
+	isMovable() {
+		return this.target ? this.target.player !== this.piece.player : !this.captureOnly;
 	}
 }
 
@@ -248,7 +258,7 @@ class Pawn extends Piece {
 			let {inside, value} = gameBoard.get(x1, y1);
 			if(!inside) return; //枠外なら無視
 			if(!value) value = this.getEnPassant(gameBoard, dx) ?? value;
-			result.push(new ActionPlan(x1, y1, this, value).setGetOnly(true)); //普通に移動は出来ないけど一応戦闘範囲
+			result.push(new ActionPlan(x1, y1, this, value).setCaptureOnly(true)); //普通に移動は出来ないけど一応戦闘範囲
 		});
 		return result;
 	}
@@ -276,45 +286,81 @@ const CANVAS_SIZE = TILE * BOARD_SIZE;
 const TILE_COLORS = Object.freeze(["#C8C8C8", "#64C8C8"]);
 
 class BoardDrawer {
-	constructor(canvas) {
-		canvas.width = CANVAS_SIZE;
-		canvas.height = CANVAS_SIZE;
-
-		this.ctx = canvas.getContext("2d");
+	constructor(ctx) {
+		this.ctx = ctx;
 		this.ctx.imageSmoothingEnabled = false;
 		this.ctx.strokeStyle = "rgba(255, 255, 255, 255)";
+
+		this.cx = undefined;
+		this.cy = undefined;
+		this.plans = undefined;
+	}
+
+	setCursor(cx, cy) {
+		this.cx = cx;
+		this.cy = cy;
+	}
+
+	setActionPlans(plans) {
+		this.plans = plans;
 	}
 
 	draw(gameBoard) {
 		this.ctx.clearRect(0, 0, gameBoard.w*TILE, gameBoard.h*TILE);
+
 		for(let y=0; y<gameBoard.h; y++) {
 			for(let x=0, i=y&1; x<gameBoard.w; x++, i^=1) {
 				this.ctx.fillStyle = TILE_COLORS[i];
 				this.ctx.fillRect(x*TILE, y*TILE, TILE, TILE);
 
+				if(x == this.cx && y == this.cy) {
+					this.ctx.fillStyle = 'rgba(255, 255, 0, 50)';
+					this.ctx.fillRect(this.cx*TILE, this.cy*TILE, TILE, TILE);
+				}
+
 				const piece = gameBoard.get(x, y).value;
-				if(!piece) continue;
-				this.ctx.drawImage(PIECE_IMAGES,
-						piece.imageNum*PIECE_SIZE, piece.player.imageNum*PIECE_SIZE, PIECE_SIZE, PIECE_SIZE,
-						x*TILE, y*TILE, TILE, TILE);
+				if(piece) {
+					this.ctx.drawImage(PIECE_IMAGES,
+							piece.imageNum*PIECE_SIZE, piece.player.imageNum*PIECE_SIZE, PIECE_SIZE, PIECE_SIZE,
+							x*TILE, y*TILE, TILE, TILE);
+				}
 			}
 		}
+		//プラン表示
+		this.plans?.forEach(plan => {
+			if(plan.isMovable()) this.drawCircle(plan, 'rgb(0, 255, 0)', 4.0);
+			if(plan.isCapture()) this.drawCheck(plan.target, 'rgb(255, 0, 0)', 4.0);
+		});
+	}
+	drawCircle(plan, style, width) {
+		this.ctx.strokeStyle = style;
+		this.ctx.lineWidth = width;
+		this.ctx.beginPath();
+		this.ctx.arc(plan.x*TILE+TILE/2, plan.y*TILE+TILE/2, TILE/4, 0, Math.PI*2);
+		this.ctx.stroke();
+	}
+	drawCheck(piece, style, width) {
+		this.ctx.strokeStyle = style;
+		this.ctx.lineWidth = width;
+		this.ctx.beginPath();
+		const x = piece.x * TILE + 2;
+		const y = piece.y * TILE + 2;
+		this.ctx.moveTo(x+TILE*2/8, y+TILE*4/8);
+		this.ctx.lineTo(x+TILE*3/8, y+TILE*5/8);
+		this.ctx.lineTo(x+TILE*6/8, y+TILE*2/8);
+		this.ctx.stroke();
 	}
 }
 
-window.addEventListener("load", () => init());
+window.addEventListener('load', () => init());
 
 function init() {
-	const canvas = document.getElementById("canvas");
-	const boardDrawer = new BoardDrawer(canvas);
+	const canvas = document.getElementById('canvas');
+	canvas.width = CANVAS_SIZE;
+	canvas.height = CANVAS_SIZE;
 
-	//マウスのマスを表示
-	const dp =  document.getElementById("mousepos");
-	canvas.addEventListener("mousemove", e => {
-		const x = Math.floor(e.offsetX / TILE);
-		const y = Math.floor(e.offsetY / TILE);
-		dp.textContent = "x: " + x + ", y: " + y;
-	});
+	const ctx = canvas.getContext('2d');
+	const boardDrawer = new BoardDrawer(ctx);
 
 	const wplayer = new WhitePlayer();
 	const bplayer = new BlackPlayer();
@@ -324,37 +370,70 @@ function init() {
 	//白コマ
 	const wpawn1 = new Pawn(3,5,wplayer);
 	const wpawn2 = new Pawn(2,5,wplayer);
+	const wknight1 = new Knight(1,4,wplayer);
 	const wking1 = new King(4,6,wplayer);
 	//黒コマ
 	const bpawn1 = new Pawn(4,3,bplayer);
-	const bnight1 = new Knight(3,3,bplayer);
+	const brook1 = new Rook(0,6,bplayer);
+	const bknight1 = new Knight(3,3,bplayer);
 	const bbishop1 = new Bishop(7,4,bplayer);
 	//配置
 	const gameBoard = new GameBoard();
 	gameBoard.put(wpawn1);
 	gameBoard.put(wpawn2);
+	gameBoard.put(wknight1);
 	gameBoard.put(wking1);
 	gameBoard.put(bpawn1);
-	gameBoard.put(bnight1);
+	gameBoard.put(brook1);
+	gameBoard.put(bknight1);
 	gameBoard.put(bbishop1);
 	wplayer.rebuildPlan(gameBoard);
 	bplayer.rebuildPlan(gameBoard);
 
-	console.log('whilte 2,5 -> 2,4');
-  let piece = gameBoard.get(2,5).value;
-  piece.moveTo(2,4);
-	piece.player.rebuildPlan(gameBoard);
 
-	console.log('black 4,3 -> 4,5');
-	piece = gameBoard.get(4,3).value;
-	piece.moveTo(4,5);
-	piece.player.rebuildPlan(gameBoard);
+	let player = wplayer;
+	player.rebuildPlan(gameBoard);
 
-	console.log('draw');
-	boardDrawer.draw(gameBoard);
+	const button = document.getElementById('button');
+	button.disabled = false;
+	button.textContent = '白 2,5 -> 2.4';
+	button.addEventListener('click', () => {
+		this.i = (this.i ?? 0) + 1;
+		if(this.i == 1) {
+			console.log('whilte 2,5 -> 2,4');
+ 			gameBoard.get(2,5).value.moveTo(2,4);
+			button.textContent = '黒 4,3 -> 4,5';
+		} else if(this.i == 2) {
+			console.log('black 4,3 -> 4,5');
+			gameBoard.get(4,3).value.moveTo(4,5);
+			button.textContent = '終了';
+			button.disabled = true; //これ以上はボタン操作は無し
+		}
+		player.rebuildPlan(gameBoard);
+		boardDrawer.setActionPlans(undefined);
+		boardDrawer.draw(gameBoard);
+
+		player = player.next;
+		player.rebuildPlan(gameBoard);
+	});
+
+	//マウスのマスを表示
+	const dp =  document.getElementById('mousepos');
+	canvas.addEventListener('mousemove', e => {
+		const x = Math.floor(e.offsetX / TILE);
+		const y = Math.floor(e.offsetY / TILE);
+		if(this.x == x && this.y == y) return;
+		this.x = x;
+		this.y = y;
+
+		dp.textContent = 'x: ' + x + ', y: ' + y;
+
+		boardDrawer.setCursor(x, y);
+		boardDrawer.draw(gameBoard);
+	});
 
 	//クリックでマスの情報を表示
-	canvas.addEventListener("click", e => {
+	canvas.addEventListener('click', e => {
 		const x = Math.floor(e.offsetX / TILE);
 		const y = Math.floor(e.offsetY / TILE);
 
@@ -363,11 +442,21 @@ function init() {
 		console.log(piece);
 		if(piece) {
 			console.log('piace plans');
-			console.log(piece.getActionPlans(gameBoard, piece.player.next.planBoard));
+			const plans = piece.getActionPlans(gameBoard, piece.player.next.planBoard);
+			console.log(plans);
+
+			boardDrawer.setActionPlans(plans);
+			boardDrawer.draw(gameBoard);
+		} else {
+			boardDrawer.setActionPlans(undefined);
+			boardDrawer.draw(gameBoard);
 		}
 		console.log('('+x+','+y+') wplayer plans');
-		console.log(wplayer.planBoard.get(x, y).value);
+		console.log(wplayer.planBoard?.get(x, y).value);
 		console.log('('+x+','+y+') bplayer plans');
-		console.log(bplayer.planBoard.get(x, y).value);
+		console.log(bplayer.planBoard?.get(x, y).value);
 	});
+
+	//初期表示
+	boardDrawer.draw(gameBoard);
 }
