@@ -1,30 +1,43 @@
+//java の enum みたいな感じが出来るかと試し。
+//これだけでは偽造防止にはならないわね。
 class Player {
-	constructor(imageNum) {
-		this.imageNum = imageNum;
-		this.next = null;
-		this.planBoard = null;
-	}
-	//座標補正, 左上を原点とする座標内で白は下から
-	coordinateCorrection(x, y, dx, dy) {
-		return {xx:x+dx, yy:y+dy};
-	}
-	rebuildPlan(gameBoard) {
-		this.planBoard = new PlanBoard(gameBoard, this);
-	}
-}
+	static #_WHITE;
+	static #_BLACK;
 
-class WhitePlayer extends Player {
-	constructor() {
-		super(0);
-	}
-}
+	static #create() {
+		Player.#isInternalConstracting = true;
+		const w = new Player(0);
+		const b = new Player(1);
+		Player.#isInternalConstracting = false;
+		//座標補正, 左上を原点とする座標内で白は下から
+		w.coordinateCorrection = (x, y, dx, dy) => ({xx:x+dx, yy:y+dy});
+		w.next = b;
+		//黒は上から
+		b.coordinateCorrection = (x, y, dx, dy) => ({xx:x-dx, yy:y-dy});
+		b.next = w;
 
-class BlackPlayer extends Player {
-	constructor() {
-		super(1);
+		Player.#_WHITE = Object.freeze(w);
+		Player.#_BLACK = Object.freeze(b);
 	}
-	coordinateCorrection(x, y, dx, dy) {
-		return super.coordinateCorrection(x, y, -dx, -dy);
+
+	static get WHITE() {
+		if(!Player.#_WHITE) Player.#create();
+		return Player.#_WHITE;
+	}
+	static get BLACK() {
+		if(!Player.#_BLACK) Player.#create();
+		return Player.#_BLACK;
+	}
+	static get values() {
+		if(!Player.#_WHITE) Player.#create();
+		return [Player.#_WHITE, Player.#_BLACK];
+	}
+
+	static #isInternalConstracting = false;
+
+	constructor(num) {
+		if(!Player.#isInternalConstracting) throw new TypeError('invalid constract');
+		this.num = num;
 	}
 }
 
@@ -44,19 +57,25 @@ class Piece {
 		const result = [];
 		deltas.forEach(({dx, dy}) => {
 			const route = [];
-			for(let xx=this.x, yy=this.y; ; ) {
+			for(let xx=this.x, yy=this.y; ; route.push({x:xx, y:yy})) {
 				({xx, yy} = this.player.coordinateCorrection(xx, yy, dx, dy));
-				if(!this.pushActionPlanTo(result, gameBoard, xx, yy, route)) break;
-				route.push({x:xx, y:yy});
+				const {inside, value} = gameBoard.get(xx, yy);
+				if(!inside) break; //枠の外なら終わり
+				const plan = new ActionPlan(xx, yy, this, value, route); //移動・獲得・ガード
+				result.push(plan);
+				if(value) {
+					// King をチェックした場合に同じ直線上に移動出来ないようにするため、1つ先の情報も付け足しておく
+					const extraStep = this.player.coordinateCorrection(xx, yy, dx, dy);
+					this.#appendExtraStepTo(plan, extraStep, gameBoard);
+					break;
+				}
 			}
 		});
 		return result;
 	}
-	pushActionPlanTo(result, gameBoard, x, y, route) {
-		const {inside, value} = gameBoard.get(x, y);
-		if(!inside) return false; //枠の外なら終わり
-		result.push(new ActionPlan(x, y, this, value, route)); //移動・獲得・ガード
-		return !value; //何かがあったなら終わり
+	#appendExtraStepTo(plan, extraStep, gameBoard) {
+		const {inside, value} = gameBoard.get(extraStep.xx, extraStep.yy);
+		if(inside && !value) plan.extraStep = {x:extraStep.xx, y:extraStep.yy};
 	}
 }
 
@@ -100,13 +119,9 @@ class GameBoard extends Board {
 	getKing(player) {
 		return this._board.find(v => v instanceof King);
 	}
-	beingCHECKed(player) {
-		const king = this.getKing(player);
-		return !player.next?.planBoard.get(king.x, king.y);
-	}
 }
 
-//piece 毎の次行動プラン
+//piece 毎の行動プランの情報(マス毎)
 class ActionPlan {
 	constructor(x, y, piece, target, route) {
 		this.x = x; //対象位置
@@ -134,12 +149,12 @@ class ActionPlan {
 //player 毎の次行動プラン
 // 各座標には複数の Piece の ActionPlan が入る(配列)
 class PlanBoard extends Board {
-	constructor(gameBoard, player) {
+	constructor(gameBoard, player, opponentPlanBoard) {
 		super(gameBoard.w, gameBoard.h);
 
 		//player の各駒の行動を各マスに配置する
 		gameBoard.getPieces(player)
-			.map(p => p.getActionPlans(gameBoard, player.next?.planBoard))
+			.map(p => p.getActionPlans(gameBoard, opponentPlanBoard))
 			.flat()
 			.forEach(ap => {
 				let {_, value} = this.get(ap.x, ap.y);
@@ -149,6 +164,22 @@ class PlanBoard extends Board {
 				}
 				value.arr.push(ap);
 			});
+	}
+}
+
+class PlanManager {
+	#gameBoard;
+	#planBoards = new Map();
+	constructor(gameBoard) {
+		this.#gameBoard = gameBoard;
+		for(const player of Player.values) {
+			this.#planBoards.set(player, new PlanBoard(gameBoard, player));
+		}
+	}
+	get(player) { return this.#planBoards.get(player); }
+	rebuildPlan(player) {
+		const opponentPlanBoard = this.#planBoards.get(player.next);
+		this.#planBoards.set(player, new PlanBoard(this.#gameBoard, player, opponentPlanBoard));
 	}
 }
 
@@ -183,12 +214,14 @@ class King extends Piece {
 	}
 	getActionPlans(gameBoard, opponentPlanBoard) {
 		const result = [];
+		const opponentPlans = opponentPlanBoard?.get(this.x, this.y).value?.arr;
 		A_DELTAS
 			.map(({dx,dy}) => this.player.coordinateCorrection(this.x, this.y, dx, dy))
 			.forEach(({xx, yy}) => {
 				const {inside, value} = gameBoard.get(xx, yy);
 				if(!inside) return; //枠の外ならダメ
 				if(opponentPlanBoard?.get(xx, yy).value) return; //相手の移動(攻撃)範囲もしくはガードされている相手の駒ならダメ
+				if(opponentPlans?.find(plan => plan.extraStep?.x === xx && plan.extraStep?.y === yy)) return; //直線攻撃の同じ直線上はダメ
 				result.push(new ActionPlan(xx, yy, this, value)); //移動・獲得・ガード
 			});
 		//TODO: キャスリング
@@ -222,7 +255,10 @@ class Knight extends Piece {
 		const result = [];
 		K_DELTAS
 			.map(({dx,dy}) => this.player.coordinateCorrection(this.x, this.y, dx, dy))
-			.forEach(({xx, yy}) => this.pushActionPlanTo(result, gameBoard, xx, yy));
+			.forEach(({xx, yy}) => {
+				const {inside, value} = gameBoard.get(xx, yy);
+				if(inside) result.push(new ActionPlan(xx, yy, this, value)); //移動・獲得・ガード
+			});
 		return result;
 	}
 }
@@ -239,13 +275,13 @@ class Rook extends Piece {
 class Pawn extends Piece {
 	constructor(x, y, player) {
 		super(x, y, player, 0);
-		this.firstMoved = false; //ポーンは最初の一回だけ最大2マス進める
+		this.firstMove = true; //ポーンは最初の一回だけ最大2マス進める
 		this.moveCount = 0;
 	}
 	getActionPlans(gameBoard) {
 		const result = [];
 		const route = []; //現在地点は含まない
-		for(let i=0, xx=this.x, yy=this.y; i<(this.firstMoved?1:2); i++) {
+		for(let i=0, xx=this.x, yy=this.y; i<(this.firstMove?2:1); i++) {
 			({xx, yy} = this.player.coordinateCorrection(xx, yy, 0, -1)); //一歩前
 			const {inside, value} = gameBoard.get(xx, yy);
 			if(!inside || value) break; //枠外もしくは何かに当たったならそこまで
@@ -257,13 +293,13 @@ class Pawn extends Piece {
 			const {xx:x1, yy:y1} = this.player.coordinateCorrection(this.x, this.y, dx, -1);
 			let {inside, value} = gameBoard.get(x1, y1);
 			if(!inside) return; //枠外なら無視
-			if(!value) value = this.getEnPassant(gameBoard, dx) ?? value;
+			if(!value) value = this.#getEnPassant(gameBoard, dx);
 			result.push(new ActionPlan(x1, y1, this, value).setCaptureOnly(true)); //普通に移動は出来ないけど一応戦闘範囲
 		});
 		return result;
 	}
 	//アンパッサン(en passant)
-	getEnPassant(gameBoard, dx) {
+	#getEnPassant(gameBoard, dx) {
 		const {xx, yy} = this.player.coordinateCorrection(this.x, this.y, dx, 0);
 		const value = gameBoard.get(xx, yy).value;
 		//隣りに居るのは2マス動いた相手のポーン? 残像があるぞ!
@@ -271,7 +307,7 @@ class Pawn extends Piece {
 	}
 	moveTo(x, y) {
 		this.moveCount = Math.abs(y-this.y);
-		this.firstMoved = true;
+		this.firstMove = false;
 		super.moveTo(x, y);
 	}
 }
@@ -319,35 +355,45 @@ class BoardDrawer {
 				}
 
 				const piece = gameBoard.get(x, y).value;
-				if(piece) {
-					this.ctx.drawImage(PIECE_IMAGES,
-							piece.imageNum*PIECE_SIZE, piece.player.imageNum*PIECE_SIZE, PIECE_SIZE, PIECE_SIZE,
-							x*TILE, y*TILE, TILE, TILE);
-				}
+				if(piece) this.#drawPiece(piece, x, y);
 			}
 		}
 		//プラン表示
 		this.plans?.forEach(plan => {
-			if(plan.isMovable()) this.drawCircle(plan, 'rgb(0, 255, 0)', 4.0);
-			if(plan.isCapture()) this.drawCheck(plan.target, 'rgb(255, 0, 0)', 4.0);
+			if(plan.isMovable()) this.#drawCircle(plan.x, plan.y, 'rgb(0, 255, 0)', 4.0);
+			if(plan.isCapture()) {
+				const target = plan.target;
+				this.#drawCheckMark(target.x, target.y, 'rgb(255, 0, 0)', 4.0);
+			}
 		});
 	}
-	drawCircle(plan, style, width) {
+	#drawPiece(piece, tileX, tileY) {
+		const pieceImagesX = piece.imageNum;
+		const pieceImagesY = piece.player.num;
+		this.ctx.drawImage(PIECE_IMAGES,
+				pieceImagesX*PIECE_SIZE, pieceImagesY*PIECE_SIZE, PIECE_SIZE, PIECE_SIZE,
+				tileX*TILE, tileY*TILE, TILE, TILE);
+	}
+	#drawCircle(x, y, style, lineWidth) {
 		this.ctx.strokeStyle = style;
-		this.ctx.lineWidth = width;
+		this.ctx.lineWidth = lineWidth;
+		const xx = x * TILE + TILE/2;
+		const yy = y * TILE + TILE/2;
+		const r = TILE / 4;
 		this.ctx.beginPath();
-		this.ctx.arc(plan.x*TILE+TILE/2, plan.y*TILE+TILE/2, TILE/4, 0, Math.PI*2);
+		this.ctx.arc(xx, yy, r, 0, Math.PI*2);
 		this.ctx.stroke();
 	}
-	drawCheck(piece, style, width) {
+	#drawCheckMark(x, y, style, lineWidth) {
 		this.ctx.strokeStyle = style;
-		this.ctx.lineWidth = width;
+		this.ctx.lineWidth = lineWidth;
+		const xx = x * TILE + 2;
+		const yy = y * TILE + 2;
+		const f = n => TILE * n / 8; //n=0-8
 		this.ctx.beginPath();
-		const x = piece.x * TILE + 2;
-		const y = piece.y * TILE + 2;
-		this.ctx.moveTo(x+TILE*2/8, y+TILE*4/8);
-		this.ctx.lineTo(x+TILE*3/8, y+TILE*5/8);
-		this.ctx.lineTo(x+TILE*6/8, y+TILE*2/8);
+		this.ctx.moveTo(xx+f(2), yy+f(4));
+		this.ctx.lineTo(xx+f(3), yy+f(5));
+		this.ctx.lineTo(xx+f(6), yy+f(2));
 		this.ctx.stroke();
 	}
 }
@@ -362,37 +408,37 @@ function init() {
 	const ctx = canvas.getContext('2d');
 	const boardDrawer = new BoardDrawer(ctx);
 
-	const wplayer = new WhitePlayer();
-	const bplayer = new BlackPlayer();
-	wplayer.next = bplayer;	//白の次は黒
-	bplayer.next = wplayer; //黒の次は白
-
 	//白コマ
-	const wpawn1 = new Pawn(3,5,wplayer);
-	const wpawn2 = new Pawn(2,5,wplayer);
-	const wknight1 = new Knight(1,4,wplayer);
-	const wking1 = new King(4,6,wplayer);
+	const wpawn1 = new Pawn(3,5,Player.WHITE);
+	const wpawn2 = new Pawn(2,5,Player.WHITE);
+	const wknight1 = new Knight(1,4,Player.WHITE);
+	const wqueen = new Queen(2,7,Player.WHITE);
+	const wking = new King(4,6,Player.WHITE);
 	//黒コマ
-	const bpawn1 = new Pawn(4,3,bplayer);
-	const brook1 = new Rook(0,6,bplayer);
-	const bknight1 = new Knight(3,3,bplayer);
-	const bbishop1 = new Bishop(7,4,bplayer);
+	const bpawn1 = new Pawn(4,3,Player.BLACK);
+	const brook1 = new Rook(0,6,Player.BLACK);
+	const bknight1 = new Knight(3,3,Player.BLACK);
+	const bbishop1 = new Bishop(7,4,Player.BLACK);
+	const bqueen = new Queen(4,0,Player.BLACK);
+	const bking = new King(3,0,Player.BLACK);
 	//配置
 	const gameBoard = new GameBoard();
 	gameBoard.put(wpawn1);
 	gameBoard.put(wpawn2);
 	gameBoard.put(wknight1);
-	gameBoard.put(wking1);
+	gameBoard.put(wqueen);
+	gameBoard.put(wking);
 	gameBoard.put(bpawn1);
 	gameBoard.put(brook1);
 	gameBoard.put(bknight1);
 	gameBoard.put(bbishop1);
-	wplayer.rebuildPlan(gameBoard);
-	bplayer.rebuildPlan(gameBoard);
+	gameBoard.put(bqueen);
+	gameBoard.put(bking);
 
+	const planManager = new PlanManager(gameBoard);
 
-	let player = wplayer;
-	player.rebuildPlan(gameBoard);
+	let player = Player.WHITE;
+	planManager.rebuildPlan(player);
 
 	const button = document.getElementById('button');
 	button.disabled = false;
@@ -409,12 +455,12 @@ function init() {
 			button.textContent = '終了';
 			button.disabled = true; //これ以上はボタン操作は無し
 		}
-		player.rebuildPlan(gameBoard);
+		planManager.rebuildPlan(player);
 		boardDrawer.setActionPlans(undefined);
 		boardDrawer.draw(gameBoard);
 
 		player = player.next;
-		player.rebuildPlan(gameBoard);
+		planManager.rebuildPlan(player);
 	});
 
 	//マウスのマスを表示
@@ -437,13 +483,11 @@ function init() {
 		const x = Math.floor(e.offsetX / TILE);
 		const y = Math.floor(e.offsetY / TILE);
 
-		console.log('('+x+','+y+') piece');
 		const piece = gameBoard.get(x, y).value;
-		console.log(piece);
+		console.log('(%d,%d) piece\n%o', x, y, piece);
 		if(piece) {
-			console.log('piace plans');
-			const plans = piece.getActionPlans(gameBoard, piece.player.next.planBoard);
-			console.log(plans);
+			const plans = piece.getActionPlans(gameBoard, planManager.get(piece.player.next));
+			console.log('piace plans\n%o', plans);
 
 			boardDrawer.setActionPlans(plans);
 			boardDrawer.draw(gameBoard);
@@ -451,10 +495,8 @@ function init() {
 			boardDrawer.setActionPlans(undefined);
 			boardDrawer.draw(gameBoard);
 		}
-		console.log('('+x+','+y+') wplayer plans');
-		console.log(wplayer.planBoard?.get(x, y).value);
-		console.log('('+x+','+y+') bplayer plans');
-		console.log(bplayer.planBoard?.get(x, y).value);
+		console.log('(%d,%d) WHITE player plans\n%o', x, y, planManager.get(Player.WHITE).get(x, y).value);
+		console.log('(%d,%d) BLACK player plans\n%o', x, y, planManager.get(Player.BLACK).get(x, y).value);
 	});
 
 	//初期表示
